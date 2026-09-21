@@ -126,6 +126,29 @@
     display: none;
   }
 
+  /* ---------- CHECKLIST ---------- */
+  #panelLeft  { --accent: var(--fruit); }
+  #panelRight { --accent: var(--veg); }
+  .panel-body { white-space: normal; }
+  .item { display: flex; align-items: center; gap: 10px; padding: 7px 2px; cursor: pointer; border-bottom: 1px solid #eef1ec; }
+  .item input { width: 20px; height: 20px; margin: 0; flex: none; accent-color: var(--accent); cursor: pointer; }
+  .item span { transition: color .15s; }
+  .item.done span { text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--accent); color: var(--muted); }
+  .plain { margin: 4px 0; }
+  .status {
+    align-self: center;
+    margin: 0 10px 6px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--ink);
+    color: #fff;
+    display: none;
+  }
+  .status.warn { background: #8a5a12; }
+  @media (max-width: 480px) { .item { gap: 7px; padding: 6px 0; } .item input { width: 18px; height: 18px; } }
+
   /* ---------- INPUT BAR ---------- */
   .composer { padding: 0 10px 10px; }
   .chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
@@ -200,6 +223,7 @@
 </main>
 
 <div class="err" id="errBox" role="alert"></div>
+<div class="status" id="status" role="status"></div>
 
 <div class="composer">
   <div class="chips">
@@ -229,21 +253,72 @@
   let busy = false;
 
   /* ---------- helpers ---------- */
+  const statusBox = document.getElementById('status');
+  const ticks = { LEFT: new Set(), RIGHT: new Set() };   // ticked item keys per panel
+  const seen = new Set();                                 // panels already refreshed in this response
+  let statusTimer = null;
+
   function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
-  function formatText(s) {
-    return escapeHtml(s.replace(/^\s+/, '')).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  function inline(s) {
+    return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   }
   function showError(msg) {
     errBox.textContent = msg;
     errBox.style.display = msg ? 'block' : 'none';
   }
+  function showStatus(msg, warn) {
+    statusBox.textContent = msg;
+    statusBox.classList.toggle('warn', !!warn);
+    statusBox.style.display = 'block';
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => { statusBox.style.display = 'none'; }, 3500);
+  }
 
-  /* ---------- panel tag parser ----------
-     Poore ab tak ke text par chalta hai, isliye adhe aaye tags
-     ([LE, [/RIGH) bhi safely handle hote hain.
-     Returns { LEFT: text|null, RIGHT: text|null, open: 'LEFT'|'RIGHT'|null } */
+  /* ---------- item names / matching ---------- */
+  const nameOf = s => s.replace(/\*\*/g, '').split(/\s[-\u2013\u2014]\s|\(|:/)[0].trim();
+  const keyOf  = s => nameOf(s).toLowerCase();
+  const baseOf = k => k.replace(/s$/, '');
+
+  function allItems() {
+    const out = [];
+    ['LEFT', 'RIGHT'].forEach(p => {
+      bodies[p].querySelectorAll('input[type=checkbox]').forEach(cb => {
+        out.push({ panel: p, key: cb.dataset.key, name: nameOf(cb.parentNode.querySelector('span').textContent) });
+      });
+    });
+    return out;
+  }
+  function resolve(name) {
+    const k = keyOf(name);
+    if (!k) return [];
+    const items = allItems();
+    let hit = items.filter(i => i.key === k);
+    if (!hit.length) hit = items.filter(i => baseOf(i.key) === baseOf(k));
+    if (!hit.length && k.length >= 3) hit = items.filter(i => i.key.includes(k) || (i.key.length >= 3 && k.includes(i.key)));
+    return hit;
+  }
+  function syncChecks() {
+    ['LEFT', 'RIGHT'].forEach(p => {
+      bodies[p].querySelectorAll('input[type=checkbox]').forEach(cb => {
+        const on = ticks[p].has(cb.dataset.key);
+        cb.checked = on;
+        cb.parentNode.classList.toggle('done', on);
+      });
+    });
+  }
+  function listState() {
+    const items = allItems();
+    const fmt = p => {
+      const it = items.filter(i => i.panel === p);
+      return it.length ? it.map(i => i.name + (ticks[p].has(i.key) ? ' [ticked]' : '')).join(', ') : '(empty)';
+    };
+    return `CURRENT LIST STATE\nLEFT (Fruits): ${fmt('LEFT')}\nRIGHT (Vegetables): ${fmt('RIGHT')}`;
+  }
+
+  /* ---------- tag parsers ----------
+     Poore ab tak ke text par chalte hain, isliye adhe aaye tags safely handle hote hain. */
   function parsePanels(text) {
     const out = { LEFT: null, RIGHT: null, open: null };
     const re = /\[(LEFT|RIGHT)\]([\s\S]*?)(\[\/\1\]|$)/g;
@@ -251,33 +326,85 @@
     while ((m = re.exec(text)) !== null) {
       const key = m[1];
       let body = m[2];
-      if (!m[3]) {                       // abhi tag close nahi hua
-        body = body.replace(/\[\/?[A-Za-z]*$/, '');   // aadha closing tag hatao
+      if (!m[3]) {
+        body = body.replace(/\[\/?[A-Za-z]*$/, '');
         out.open = key;
       }
       out[key] = (out[key] || '') + body;
     }
     return out;
   }
+  // Sirf poore band hue [TICK]..[/TICK] / [UNTICK]..[/UNTICK] blocks (order mein)
+  function parseTicks(text) {
+    const cmds = [];
+    const re = /\[(TICK|UNTICK)\]([\s\S]*?)\[\/\1\]/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const names = m[2].split(/[,\n]/).map(x => x.replace(/^[-*\u2022]\s*/, '').trim()).filter(Boolean);
+      cmds.push({ type: m[1], names });
+    }
+    return cmds;
+  }
+
+  function applyTicks(cmds, isFinal) {
+    const done = [], missing = [];
+    cmds.forEach(c => c.names.forEach(n => {
+      const hits = resolve(n);
+      if (!hits.length) { if (isFinal) missing.push(n); return; }
+      hits.forEach(h => { c.type === 'TICK' ? ticks[h.panel].add(h.key) : ticks[h.panel].delete(h.key); });
+      if (isFinal) done.push((c.type === 'TICK' ? '\u2713 ' : '\u2717 ') + hits[0].name);
+    }));
+    syncChecks();
+    if (isFinal) {
+      if (done.length) showStatus(done.join('  '), false);
+      if (missing.length) showStatus('List mein nahi mila: ' + missing.join(', '), true);
+    }
+  }
+
+  /* ---------- render ---------- */
+  function renderList(text) {
+    return text.replace(/^\s+/, '').split('\n').map(line => {
+      const t = line.trim();
+      if (!t) return '';
+      const m = t.match(/^[-*\u2022]\s+(.*)$/);
+      if (m) {
+        return `<label class="item"><input type="checkbox" data-key="${escapeHtml(keyOf(m[1]))}"><span>${inline(m[1])}</span></label>`;
+      }
+      return `<div class="plain">${inline(t)}</div>`;
+    }).join('');
+  }
 
   function render(fullText, isFinal) {
     const parsed = parsePanels(fullText);
-    const hasTags = parsed.LEFT !== null || parsed.RIGHT !== null;
+    const cmds = parseTicks(fullText);
+    const hasPanels = parsed.LEFT !== null || parsed.RIGHT !== null;
 
-    if (!hasTags) {
-      // Tag abhi aaya nahi. Final ho gaya aur model ne tag nahi diya -> LEFT mein dikhao.
-      if (isFinal && fullText.trim()) {
-        bodies.LEFT.innerHTML = formatText(fullText);
-      }
-      return;
+    if (hasPanels) {
+      ['LEFT', 'RIGHT'].forEach(k => {
+        if (parsed[k] !== null) {
+          if (!seen.has(k)) { seen.add(k); ticks[k].clear(); }   // naya list -> purane ticks reset
+          bodies[k].innerHTML = renderList(parsed[k]);
+        }
+        panels[k].classList.toggle('live', !isFinal && parsed.open === k);
+      });
+      if (parsed.open) bodies[parsed.open].scrollTop = bodies[parsed.open].scrollHeight;
+    } else if (!cmds.length && isFinal && fullText.trim()) {
+      // Model ne koi tag nahi diya -> LEFT mein dikhao
+      bodies.LEFT.innerHTML = renderList(fullText);
     }
-    ['LEFT', 'RIGHT'].forEach(k => {
-      if (parsed[k] !== null) bodies[k].innerHTML = formatText(parsed[k]);
-      panels[k].classList.toggle('live', !isFinal && parsed.open === k);
-    });
-    // Sirf jo panel abhi likha ja raha hai, use neeche tak scroll karo
-    if (parsed.open) bodies[parsed.open].scrollTop = bodies[parsed.open].scrollHeight;
+
+    if (cmds.length) applyTicks(cmds, isFinal); else syncChecks();
   }
+
+  // Haath se tap karke bhi tick/untick
+  ['LEFT', 'RIGHT'].forEach(p => {
+    bodies[p].addEventListener('change', e => {
+      const cb = e.target;
+      if (!cb.matches || !cb.matches('input[type=checkbox]')) return;
+      cb.checked ? ticks[p].add(cb.dataset.key) : ticks[p].delete(cb.dataset.key);
+      syncChecks();
+    });
+  });
 
   /* ---------- SSE stream reader ---------- */
   function extractText(json) {
@@ -291,11 +418,12 @@
 
     const now = new Date().toLocaleString('en-GB');
     const systemInstruction = {
-      parts: [{ text: `User device time: ${now}. User location is Oman (GST, UTC+4).` }]
+      parts: [{ text: `User device time: ${now}. User location is Oman (GST, UTC+4).\n\n${listState()}` }]
     };
 
     controller = new AbortController();
     let full = '';
+    seen.clear();
 
     try {
       const res = await fetch(API_URL, {
@@ -401,6 +529,7 @@
     history = [];
     bodies.LEFT.innerHTML = '';
     bodies.RIGHT.innerHTML = '';
+    ticks.LEFT.clear(); ticks.RIGHT.clear();
     showError('');
   });
 </script>
