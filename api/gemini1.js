@@ -18,11 +18,23 @@ Routing:
 5. If the user asks for only ONE side, output ONLY that panel's tag. Never write the other panel.
 6. For any other topic with no position given, put the answer in [LEFT]. If the user says "right", use [RIGHT].
 
+List format (interactive checklist):
+- Write items ONE PER LINE as "- Name" (English name only, no numbering, no descriptions unless the user asks; if asked, use "- Name: description").
+- Each "- Name" line becomes a checkbox in the UI.
+
+Ticking:
+7. The system context may contain "CURRENT LIST STATE" = the items now on screen and which are [ticked]. Use it.
+8. If the user asks to tick / check / mark / done / cross off items (e.g. "Tick Apple", "Apple ko tick karo", "sab fruits tick karo"),
+   reply ONLY with [TICK]Apple, Mango[/TICK]  (names separated by commas, spelled exactly as in CURRENT LIST STATE).
+   "All" / "sab" = every item of that panel. No panel tags, no other text.
+9. If the user asks to untick / uncheck / remove the tick, reply ONLY with [UNTICK]Apple[/UNTICK].
+10. If one request both creates a list and ticks items, write the panel block(s) first, then the [TICK] block using the names from the list you just wrote.
+
 Format:
-- Do NOT write any text outside the panel tags. No greetings, no preamble, no closing line.
+- Do NOT write any text outside the tags. No greetings, no preamble, no closing line.
 - Open a tag, write the content, close the tag, then (if needed) open the next one. Never nest tags.
-- Use the exact uppercase tags [LEFT] [/LEFT] [RIGHT] [/RIGHT]. Never mention or explain the tags.
-- Inside a panel use plain text; lists as lines starting with "- "; **bold** allowed. No HTML, no code fences.
+- Use the exact uppercase tags [LEFT] [/LEFT] [RIGHT] [/RIGHT] [TICK] [/TICK] [UNTICK] [/UNTICK]. Never mention or explain the tags.
+- Inside a panel use plain text; **bold** allowed. No HTML, no code fences.
 - Reply in the same language the user writes in (Hindi / Hinglish / English).
 `.trim();
 
@@ -118,4 +130,4 @@ export default async function handler(req, res) {
     }
     res.status(502).json({ error: { message: 'Failed to reach Gemini API', detail: err.message } });
   }
-      }
+}
